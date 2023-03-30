@@ -105,7 +105,7 @@ class PriorDiffusionModel(torch.nn.Module):
         def guided_model_fn(x_t, ts, **kwargs):
             half = x_t[: len(x_t) // 2]
             combined = torch.cat([half, half], dim=0)
-            model_out = self.model(combined, ts, **kwargs)
+            model_out = self.model(combined, ts, **kwargs) ## prior 模型
             eps, rest = (
                 model_out[:, : int(x_t.shape[1])],
                 model_out[:, int(x_t.shape[1]) :],

@@ -270,46 +270,18 @@ def load_model_from_config(config, ckpt, verbose=False, vae_sd=None):
 
 
 if __name__ == "__main__":
-    st.title("Stable unCLIP")
-    mode = "txt2img"
-    version = st.selectbox("Model Version", list(VERSION2SPECS.keys()), 0)
-    use_karlo_prior = version in ["Stable unCLIP-L"] and st.checkbox("Use KARLO prior", False)
-    use_karlo_prior = True # for debug using karlo
+    version = 'Stable unCLIP-L'
+    use_karlo_prior = True
+    prompt = "a beautiful girl"
+    number_cols = 1
+    
+    
+
     state = init(version=version, load_karlo_prior=use_karlo_prior)
-    prompt = st.text_input("Prompt", "a professional photograph")
-    negative_prompt = st.text_input("Negative Prompt", "")
-    scale = st.number_input("cfg-scale", value=10., min_value=-100., max_value=100.)
-    number_rows = st.number_input("num rows", value=2, min_value=1, max_value=10)
-    number_cols = st.number_input("num cols", value=1, min_value=1, max_value=10)
-    steps = st.sidebar.number_input("steps", value=20, min_value=1, max_value=1000)
-    eta = st.sidebar.number_input("eta (DDIM)", value=0., min_value=0., max_value=1.)
-    force_full_precision = st.sidebar.checkbox("Force FP32", False)  # TODO: check if/where things break.
-    if version != "Full Karlo":
-        H = st.sidebar.number_input("H", value=VERSION2SPECS[version]["H"], min_value=64, max_value=2048)
-        W = st.sidebar.number_input("W", value=VERSION2SPECS[version]["W"], min_value=64, max_value=2048)
-        C = VERSION2SPECS[version]["C"]
-        f = VERSION2SPECS[version]["f"]
-
-    SAVE_PATH = os.path.join(SAVE_PATH, version)
-    os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
-
-    seed = st.sidebar.number_input("seed", value=42, min_value=0, max_value=int(1e9))
-    seed_everything(seed)
-
-    ucg_schedule = None
-    sampler = st.sidebar.selectbox("Sampler", ["DDIM", "DPM"], 0)
-    if version == "Full Karlo":
-        pass
-    else:
-        if sampler == "DPM":
-            sampler = DPMSolverSampler(state["model"])
-        elif sampler == "DDIM":
-            sampler = DDIMSampler(state["model"])
-        else:
-            raise ValueError(f"unknown sampler {sampler}!")
-
+    
+    ###########
     adm_cond, adm_uc = None, None
-    if use_karlo_prior: #使用karlo提取的特征emb
+    if False:#use_karlo_prior: #使用karlo提取的特征emb
         # uses the prior
         karlo_sampler = state["karlo_prior"]
         noise_level = None
@@ -325,51 +297,35 @@ if __name__ == "__main__":
                 )
             ).__next__()
             adm_cond = karlo_prediction
-            if False:
-            #if noise_level is not None: #对karlo提取的特征emb 加 随机噪声
-                c_adm, noise_level_emb = state["model"].noise_augmentor(adm_cond, noise_level=repeat(
-                    torch.tensor([noise_level]).to(state["model"].device), '1 -> b', b=number_cols))
-                adm_cond = torch.cat((c_adm, noise_level_emb), 1)
             adm_uc = torch.zeros_like(adm_cond)
-    elif version == "Full Karlo":
-        pass
+    #直接使用 karlo的 img emb
     else:
-        num_inputs = st.number_input("Number of Input Images", 1)
+        from diffusers import DiffusionPipeline
+        dtype = torch.float16
+        device = 'cuda'
+        pipe = DiffusionPipeline.from_pretrained("/www/simple_ssd/lxn3/mtimageblend/plugins/imageblend/models/karlo-v1-alpha-image-variations", \
+            torch_dtype=dtype, custom_pipeline='src/unclip_image_interpolation_lxn.py')
+        pipe.to(device)
 
+        imgpath = '' 
+        imginput = Image.open(imgpath).convert("RGB") # PIL
+        adm_cond = pipe._encode_image(image=imginput, device=device, num_images_per_prompt=1, image_embeddings=None)
+        adm_uc = torch.zeros_like(adm_cond)
+    ###########
 
-        def make_conditionings_from_input(num=1, key=None):
-            init_img = get_init_img(batch_size=number_cols, key=key)
-            with torch.no_grad():
-                adm_cond = state["model"].embedder(init_img)
-                weight = st.slider(f"Weight for Input {num}", min_value=-10., max_value=10., value=1.)
-                if state["model"].noise_augmentor is not None:
-                    noise_level = st.number_input(f"Noise Augmentation for CLIP embedding of input #{num}", min_value=0,
-                                                  max_value=state["model"].noise_augmentor.max_noise_level - 1,
-                                                  value=0, )
-                    c_adm, noise_level_emb = state["model"].noise_augmentor(adm_cond, noise_level=repeat(
-                        torch.tensor([noise_level]).to(state["model"].device), '1 -> b', b=number_cols))
-                    adm_cond = torch.cat((c_adm, noise_level_emb), 1) * weight
-                adm_uc = torch.zeros_like(adm_cond)
-            return adm_cond, adm_uc, weight
-
-
-        adm_inputs = list()
-        weights = list()
-        for n in range(num_inputs):
-            adm_cond, adm_uc, w = make_conditionings_from_input(num=n + 1, key=n)
-            weights.append(w)
-            adm_inputs.append(adm_cond)
-        adm_cond = torch.stack(adm_inputs).sum(0) / sum(weights)
-        if num_inputs > 1:
-            if st.checkbox("Apply Noise to Embedding Mix", True):
-                noise_level = st.number_input(f"Noise Augmentation for averaged CLIP embeddings", min_value=0,
-                                              max_value=state["model"].noise_augmentor.max_noise_level - 1, value=50, )
-                c_adm, noise_level_emb = state["model"].noise_augmentor(
-                    adm_cond[:, :state["model"].noise_augmentor.time_embed.dim],
-                    noise_level=repeat(
-                        torch.tensor([noise_level]).to(state["model"].device), '1 -> b', b=number_cols))
-                adm_cond = torch.cat((c_adm, noise_level_emb), 1)
-
+    number_rows = 2
+    steps = 20
+    H = 768
+    W = 768
+    C = 4
+    f = 8
+    scale = 10.0
+    eta = 0.0
+    ucg_schedule = None
+    negative_prompt = ''
+    force_full_precision = False
+    
+    
     if True: # 开始扩散模型
     #if st.button("Sample"):
         print("running prompt:", prompt)

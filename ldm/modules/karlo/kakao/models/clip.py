@@ -74,7 +74,7 @@ class CustomizedCLIP(CLIP):
     @classmethod
     def load_from_checkpoint(cls, ckpt_path: str):
         state_dict = torch.load(ckpt_path, map_location="cpu").state_dict()
-
+        #state_dict = torch.jit.load(ckpt_path, map_location="cpu").state_dict()
         vit = "visual.proj" in state_dict
         if vit:
             vision_width = state_dict["visual.conv1.weight"].shape[0]
