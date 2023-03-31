@@ -17,7 +17,7 @@ from contextlib import nullcontext
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
 from ldm.models.diffusion.dpm_solver import DPMSolverSampler
-
+from diffusers import DiffusionPipeline
 torch.set_grad_enabled(False)
 
 PROMPTS_ROOT = "scripts/prompts/"
@@ -279,6 +279,10 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
 
     state = init(version=version, load_karlo_prior=use_karlo_prior)
+    pipe_img_karlo = DiffusionPipeline.from_pretrained("/www/simple_ssd/lxn3/mtimageblend/plugins/imageblend/models/karlo-v1-alpha-image-variations", \
+            torch_dtype=torch.float16, custom_pipeline='src/unclip_image_interpolation_lxn.py')
+    pipe_img_karlo.to('cuda')
+
     seed_everything(2023)
     ###########
     adm_cond, adm_uc = None, None
@@ -302,16 +306,9 @@ if __name__ == "__main__":
 
     #直接使用 karlo的 img emb
     else:
-        from diffusers import DiffusionPipeline
-        dtype = torch.float16
-        device = 'cuda'
-        pipe = DiffusionPipeline.from_pretrained("/www/simple_ssd/lxn3/mtimageblend/plugins/imageblend/models/karlo-v1-alpha-image-variations", \
-            torch_dtype=dtype, custom_pipeline='src/unclip_image_interpolation_lxn.py')
-        pipe.to(device)
-
         imgpath = 'assets/stable-samples/img2img/upscaling-in.png' 
         imginput = Image.open(imgpath).convert("RGB") # PIL
-        adm_cond = pipe._encode_image(image=imginput, device=device, num_images_per_prompt=1, image_embeddings=None)
+        adm_cond = pipe_img_karlo._encode_image(image=imginput, device='cuda', num_images_per_prompt=1, image_embeddings=None)
         
 
     if noise_level is not None: #对karlo提取的特征emb 加 随机噪声
