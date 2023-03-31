@@ -53,6 +53,16 @@ def get_interactive_image(key=None):
             image = image.convert("RGB")
         return image
 
+def load_img_local(path):
+    image = Image.open(path).convert("RGB")
+    w, h = image.size
+    #print(f"loaded input image of size ({w}, {h}) from {path}")
+    w, h = map(lambda x: x - x % 64, (w, h))  # resize to integer multiple of 64
+    image = image.resize((w, h), resample=PIL.Image.LANCZOS)
+    image = np.array(image).astype(np.float32) / 255.0
+    image = image[None].transpose(0, 3, 1, 2)
+    image = torch.from_numpy(image)
+    return 2. * image - 1.
 
 def load_img(display=True, key=None):
     image = get_interactive_image(key=key)
@@ -134,6 +144,7 @@ def sample(
                     else:
                         c = adm_cond
                         uc = adm_uc
+                #上面整理完了扩散模型的引导特征, crossattn是context，这边不会有变动，adm则是这里真正使用的img clip emb   
                 samples_ddim, _ = sampler.sample(S=ddim_steps,
                                                  conditioning=c,
                                                  batch_size=batch_size,
@@ -147,9 +158,13 @@ def sample(
                                                  ucg_schedule=ucg_schedule
                                                  ) # 扩散过程
                 x_samples = model.decode_first_stage(samples_ddim) # decode (1, 4, 96, 96) -> (1, 3, 768, 768)
-                #samples_ddim2 = model.encode_first_stage(x_samples)
-                #x_samples2 = model.decode_first_stage(samples_ddim2)
                 x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
+                
+                #image = load_img_local('/www/simple_ssd/lxn3/karlo/datatest/317_2/style/starry_night.jpeg')
+                #image = image.type(x_samples.dtype).to(x_samples.device)
+                #samples_ddim2 = model.get_first_stage_encoding(model.encode_first_stage(image))
+                #x_samples2 = model.decode_first_stage(samples_ddim2)
+                
 
                 if not skip_single_save:
                     base_count = len(os.listdir(os.path.join(SAVE_PATH, "samples")))
@@ -272,107 +287,57 @@ def load_model_from_config(config, ckpt, verbose=False, vae_sd=None):
 
 
 if __name__ == "__main__":
+    #配置
     version = 'Stable unCLIP-L'
-    use_karlo_prior = True
+    steps = 20 #采样步数
     
-    number_cols = 1
-    
-    SAVE_PATH = os.path.join(SAVE_PATH, version)
-    os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
-
-    state = init(version=version, load_karlo_prior=use_karlo_prior)
+    #初始化模型
+    state = init(version=version, load_karlo_prior=True)
     pipe_img_karlo = DiffusionPipeline.from_pretrained("/www/simple_ssd/lxn3/mtimageblend/plugins/imageblend/models/karlo-v1-alpha-image-variations", \
             torch_dtype=torch.float16, custom_pipeline='src/unclip_image_interpolation_lxn.py')
-    pipe_img_karlo.to('cuda')
+    pipe_img_karlo.to('cuda')    
+    sampler = DDIMSampler(state["model"])
+    
+    #使用karlo提取的特征emb
+    noise_level = 0 if state["model"].noise_augmentor is not None else None
+    
+    t_progress = st.progress(0)
+    def t_callback(t):
+        t_progress.progress(min((t + 1) / steps, 1.))
 
     seed_everything(2023)
-    ###########
-    adm_cond, adm_uc = None, None
-    #使用karlo提取的特征emb
-    
-    karlo_sampler = state["karlo_prior"]
-    noise_level = None
-    if state["model"].noise_augmentor is not None:
-        noise_level = 0
-    prompt = ""
-    if False:
-        with torch.no_grad():
-            adm_cond = iter(karlo_sampler(prompt="", bsz=1, progressive_mode="final" )).__next__()
 
-    #直接使用 karlo的 img emb
-    else:
-        imgpath = '/www/simple_ssd/lxn3/karlo/datatest/317_2/style/bardiir_child_from_bowser_and_peach_65fdfd0e-6e95-4c6d-bf9e-412d11826de1_po.png' 
+    SAVE_PATH = os.path.join(SAVE_PATH, version)
+    os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
+    
+    input_img = '/www/simple_ssd/lxn3/karlo/datatest/317_2/style/'
+    for imgi in os.listdir(input_img):
+        #直接使用 karlo的 img emb
+        imgpath = os.path.join(input_img, imgi) 
         imginput = Image.open(imgpath).convert("RGB") # PIL
         adm_cond = pipe_img_karlo._encode_image(image=imginput, device='cuda', num_images_per_prompt=1, image_embeddings=None)
         
-
-    if noise_level is not None: #对karlo提取的特征emb 加 随机噪声
-        c_adm, noise_level_emb = state["model"].noise_augmentor(adm_cond, noise_level=repeat(
-                    torch.tensor([noise_level]).to(state["model"].device), '1 -> b', b=number_cols))
-        adm_cond = torch.cat((adm_cond, noise_level_emb), 1) # noise_level_emb 是 positional embeddings
-        #adm_cond = torch.cat((c_adm, noise_level_emb), 1)
-    adm_uc = torch.zeros_like(adm_cond)
-    
-    ###########
-
-    number_rows = 2
-    steps = 20
-    H = 768
-    W = 768
-    C = 4
-    f = 8
-    scale = 10.0
-    eta = 0.0
-    ucg_schedule = None
-    negative_prompt = ''
-    force_full_precision = False
-    
-    sampler = DDIMSampler(state["model"])
-    
-    if True: # 开始扩散模型
-    #if st.button("Sample"):
-        print("running prompt:", prompt)
-        st.text("Sampling")
-        t_progress = st.progress(0)
-        result = st.empty()
-
-
-        def t_callback(t):
-            t_progress.progress(min((t + 1) / steps, 1.))
-
-
-        if version == "Full Karlo":
-            outputs = st.empty()
-            karlo_sampler = state["karlo_prior"]
-            all_samples = list()
-            with torch.no_grad():
-                for _ in range(number_rows):
-                    karlo_prediction = iter(
-                        karlo_sampler(
-                            prompt=prompt,
-                            bsz=number_cols,
-                            progressive_mode="final",
-                        )
-                    ).__next__()
-                    all_samples.append(karlo_prediction)
-            grid = torch.stack(all_samples, 0)
-            grid = rearrange(grid, 'n b c h w -> (n h) (b w) c')
-            outputs.image(grid.cpu().numpy())
-
-        else:
-            samples = sample(
-                state["model"],
-                prompt,
-                n_runs=1,
-                n_samples=1,
-                H=H, W=W, C=C, f=f,
-                scale=scale,
-                ddim_steps=steps,
-                ddim_eta=eta,
-                callback=t_callback,
-                ucg_schedule=ucg_schedule,
-                negative_prompt=negative_prompt,
-                adm_cond=adm_cond, adm_uc=adm_uc,
-                use_full_precision=force_full_precision,
-                only_adm_cond=False
-            )
+        if noise_level is not None: #对karlo提取的特征emb 加 随机噪声
+            c_adm, noise_level_emb = state["model"].noise_augmentor(adm_cond, noise_level=repeat(
+                        torch.tensor([noise_level]).to(state["model"].device), '1 -> b', b=1))
+            adm_cond = torch.cat((adm_cond, noise_level_emb), 1) # noise_level_emb 是 positional embeddings
+            #adm_cond = torch.cat((c_adm, noise_level_emb), 1)
+        adm_uc = torch.zeros_like(adm_cond)
+        
+        # 开始扩散模型
+        samples = sample(
+                    state["model"],
+                    "",#prompt
+                    n_runs=1,
+                    n_samples=1,
+                    H=768, W=768, C=4, f=8,
+                    scale=10.0,
+                    ddim_steps=steps,
+                    ddim_eta=0.0,
+                    callback=t_callback,
+                    ucg_schedule=None,
+                    negative_prompt='',
+                    adm_cond=adm_cond, adm_uc=adm_uc,
+                    use_full_precision=False,
+                    only_adm_cond=False
+                )
