@@ -275,19 +275,21 @@ if __name__ == "__main__":
     prompt = "a beautiful girl"
     number_cols = 1
     
-    
+    SAVE_PATH = os.path.join(SAVE_PATH, version)
+    os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
 
     state = init(version=version, load_karlo_prior=use_karlo_prior)
-    
+    seed_everything(2023)
     ###########
     adm_cond, adm_uc = None, None
-    if False:#use_karlo_prior: #使用karlo提取的特征emb
-        # uses the prior
-        karlo_sampler = state["karlo_prior"]
-        noise_level = None
-        if state["model"].noise_augmentor is not None:
-            noise_level = st.number_input("Noise Augmentation for CLIP embeddings", min_value=0,
+    #使用karlo提取的特征emb
+    
+    karlo_sampler = state["karlo_prior"]
+    noise_level = None
+    if state["model"].noise_augmentor is not None:
+        noise_level = st.number_input("Noise Augmentation for CLIP embeddings", min_value=0,
                                           max_value=state["model"].noise_augmentor.max_noise_level - 1, value=0)
+    if False:
         with torch.no_grad():
             karlo_prediction = iter(
                 karlo_sampler(
@@ -297,7 +299,7 @@ if __name__ == "__main__":
                 )
             ).__next__()
             adm_cond = karlo_prediction
-            adm_uc = torch.zeros_like(adm_cond)
+
     #直接使用 karlo的 img emb
     else:
         from diffusers import DiffusionPipeline
@@ -307,10 +309,18 @@ if __name__ == "__main__":
             torch_dtype=dtype, custom_pipeline='src/unclip_image_interpolation_lxn.py')
         pipe.to(device)
 
-        imgpath = '' 
+        imgpath = 'assets/stable-samples/img2img/upscaling-in.png' 
         imginput = Image.open(imgpath).convert("RGB") # PIL
         adm_cond = pipe._encode_image(image=imginput, device=device, num_images_per_prompt=1, image_embeddings=None)
-        adm_uc = torch.zeros_like(adm_cond)
+        
+
+    if noise_level is not None: #对karlo提取的特征emb 加 随机噪声
+        c_adm, noise_level_emb = state["model"].noise_augmentor(adm_cond, noise_level=repeat(
+                    torch.tensor([noise_level]).to(state["model"].device), '1 -> b', b=number_cols))
+        adm_cond = torch.cat((adm_cond, noise_level_emb), 1)
+        #adm_cond = torch.cat((c_adm, noise_level_emb), 1)
+    adm_uc = torch.zeros_like(adm_cond)
+    
     ###########
 
     number_rows = 2
@@ -325,6 +335,7 @@ if __name__ == "__main__":
     negative_prompt = ''
     force_full_precision = False
     
+    sampler = DDIMSampler(state["model"])
     
     if True: # 开始扩散模型
     #if st.button("Sample"):
