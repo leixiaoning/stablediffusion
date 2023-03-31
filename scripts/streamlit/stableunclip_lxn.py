@@ -76,7 +76,7 @@ def get_init_img(batch_size=1, key=None):
 
 def sample(
         model,
-        prompt,
+        prompt,#基于prompt生成的context引导，在unet里面使用，不影响效果
         n_runs=3,
         n_samples=2,
         H=512,
@@ -146,7 +146,9 @@ def sample(
                                                  callback=callback,
                                                  ucg_schedule=ucg_schedule
                                                  ) # 扩散过程
-                x_samples = model.decode_first_stage(samples_ddim)
+                x_samples = model.decode_first_stage(samples_ddim) # decode (1, 4, 96, 96) -> (1, 3, 768, 768)
+                #samples_ddim2 = model.encode_first_stage(x_samples)
+                #x_samples2 = model.decode_first_stage(samples_ddim2)
                 x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
 
                 if not skip_single_save:
@@ -272,7 +274,7 @@ def load_model_from_config(config, ckpt, verbose=False, vae_sd=None):
 if __name__ == "__main__":
     version = 'Stable unCLIP-L'
     use_karlo_prior = True
-    prompt = "a beautiful girl"
+    
     number_cols = 1
     
     SAVE_PATH = os.path.join(SAVE_PATH, version)
@@ -291,22 +293,15 @@ if __name__ == "__main__":
     karlo_sampler = state["karlo_prior"]
     noise_level = None
     if state["model"].noise_augmentor is not None:
-        noise_level = st.number_input("Noise Augmentation for CLIP embeddings", min_value=0,
-                                          max_value=state["model"].noise_augmentor.max_noise_level - 1, value=0)
+        noise_level = 0
+    prompt = ""
     if False:
         with torch.no_grad():
-            karlo_prediction = iter(
-                karlo_sampler(
-                    prompt=prompt,
-                    bsz=number_cols,
-                    progressive_mode="final",
-                )
-            ).__next__()
-            adm_cond = karlo_prediction
+            adm_cond = iter(karlo_sampler(prompt="", bsz=1, progressive_mode="final" )).__next__()
 
     #直接使用 karlo的 img emb
     else:
-        imgpath = 'assets/stable-samples/img2img/upscaling-in.png' 
+        imgpath = '/www/simple_ssd/lxn3/karlo/datatest/317_2/style/bardiir_child_from_bowser_and_peach_65fdfd0e-6e95-4c6d-bf9e-412d11826de1_po.png' 
         imginput = Image.open(imgpath).convert("RGB") # PIL
         adm_cond = pipe_img_karlo._encode_image(image=imginput, device='cuda', num_images_per_prompt=1, image_embeddings=None)
         
@@ -314,7 +309,7 @@ if __name__ == "__main__":
     if noise_level is not None: #对karlo提取的特征emb 加 随机噪声
         c_adm, noise_level_emb = state["model"].noise_augmentor(adm_cond, noise_level=repeat(
                     torch.tensor([noise_level]).to(state["model"].device), '1 -> b', b=number_cols))
-        adm_cond = torch.cat((adm_cond, noise_level_emb), 1)
+        adm_cond = torch.cat((adm_cond, noise_level_emb), 1) # noise_level_emb 是 positional embeddings
         #adm_cond = torch.cat((c_adm, noise_level_emb), 1)
     adm_uc = torch.zeros_like(adm_cond)
     
@@ -368,8 +363,8 @@ if __name__ == "__main__":
             samples = sample(
                 state["model"],
                 prompt,
-                n_runs=number_rows,
-                n_samples=number_cols,
+                n_runs=1,
+                n_samples=1,
                 H=H, W=W, C=C, f=f,
                 scale=scale,
                 ddim_steps=steps,
