@@ -325,8 +325,7 @@ if __name__ == "__main__":
                 )
             ).__next__()
             adm_cond = karlo_prediction
-            if False:
-            #if noise_level is not None: #对karlo提取的特征emb 加 随机噪声
+            if noise_level is not None: #对karlo提取的特征emb 加 随机噪声
                 c_adm, noise_level_emb = state["model"].noise_augmentor(adm_cond, noise_level=repeat(
                     torch.tensor([noise_level]).to(state["model"].device), '1 -> b', b=number_cols))
                 adm_cond = torch.cat((c_adm, noise_level_emb), 1)
