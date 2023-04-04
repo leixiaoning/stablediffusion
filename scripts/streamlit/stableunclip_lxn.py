@@ -311,21 +311,20 @@ if __name__ == "__main__":
     
     input_img = '/www/simple_ssd/lxn3/karlo/datatest/317_2/reconstruct/'
     global sub_dir
-    sub_dir = 'test1'
+    sub_dir = 'testkarlo'
     os.makedirs(os.path.join(SAVE_PATH, sub_dir), exist_ok=True)
 
     for imgi in os.listdir(input_img):
         #直接使用 karlo的 img emb     ([1, 768])
-        #imgpath = os.path.join(input_img, imgi) 
-        #imginput = Image.open(imgpath).convert("RGB") # PIL
-        #adm_cond = pipe_img_karlo._encode_image(image=imginput, device='cuda', num_images_per_prompt=1, image_embeddings=None)
+        imgpath = os.path.join(input_img, imgi) 
+        imginput = Image.open(imgpath).convert("RGB") # PIL
+        adm_cond = pipe_img_karlo._encode_image(image=imginput, device='cuda', num_images_per_prompt=1, image_embeddings=None)
         
         #自身的img emb
-        imgpath = os.path.join(input_img, imgi)
-        image = load_img_local(imgpath)
-        image = repeat(image, '1 ... -> b ...', b=1)
-
-        adm_cond = state["model"].embedder(image.type(torch.float16).to('cuda'))
+        #imgpath = os.path.join(input_img, imgi)
+        #image = load_img_local(imgpath)
+        #image = repeat(image, '1 ... -> b ...', b=1)
+        #adm_cond = state["model"].embedder(image.type(torch.float16).to('cuda'))
 
 
         if noise_level is not None: #对karlo提取的特征emb 加 随机噪声
