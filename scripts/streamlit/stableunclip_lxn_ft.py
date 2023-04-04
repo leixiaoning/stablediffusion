@@ -18,6 +18,12 @@ from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
 from ldm.models.diffusion.dpm_solver import DPMSolverSampler
 from diffusers import DiffusionPipeline
+from accelerate import Accelerator
+from ft_config import FTConfig, collate_fn, DreamBoothDataset, load_image, resize_image
+import bitsandbytes as bnb
+import itertools
+from diffusers.optimization import get_scheduler
+import json as js
 torch.set_grad_enabled(False)
 
 PROMPTS_ROOT = "scripts/prompts/"
@@ -298,6 +304,79 @@ if __name__ == "__main__":
     pipe_img_karlo.to('cuda')    
     sampler = DDIMSampler(state["model"])
     
+    tokenizer = state["karlo_prior"]._tokenizer
+    config = FTConfig()
+    accelerator = Accelerator(mixed_precision='fp16', log_with="tensorboard", logging_dir='cache/log')
+    if accelerator.is_main_process:
+        #os.makedirs('', exist_ok=True)
+        print("accelerator main process !!")
+    optimizer_class = bnb.optim.AdamW8bit
+    params_to_optimize = (itertools.chain(state['model'].parameters(), 
+                                state['karlo_prior']._prior.parameters()))
+    optimizer = optimizer_class(
+        params_to_optimize,
+        lr=3.5075e-06,
+        betas=(0.9, 0.999),
+        weight_decay=0.01,
+        eps=1e-8,
+    )
+    request_dir = 'cache/tmp_data/'
+    instance_dir = os.path.join(request_dir, 'instance_data')
+    
+    n_valid_image = 0
+    if os.path.exists(config.instance_dir):
+        imgs = os.listdir(config.instance_dir)
+        for i in range(len(imgs)):
+            imgi = imgs[i]
+            d = os.path.join(config.instance_dir, imgi)
+            user_image, image_error_flag = load_image(d, 'jpg')
+
+            if not image_error_flag:
+                if config.face_detect:
+                    face_image, box, roll = resize_image(user_image)
+                else:
+                    face_image = cv2.resize(user_image, (1024, 1024))
+                    box = (0.0, 0.0, 1.0, 1.0)
+                    roll = 0.0
+                if not face_image is None:
+                    cv2.imwrite(os.path.join(instance_dir, str(i) + ".jpg"), face_image)
+                    with open(os.path.join(os.path.join(instance_dir, str(i) + ".jpg.json")), "w",
+                                      encoding='utf-8') as f:
+                        js.dump({"image": str(i) + ".jpg", "box": box, "roll": float(roll)}, f)
+                    n_valid_image += 1
+    if n_valid_image <= 0:
+        if os.path.exists(request_dir):
+            import shutil
+            shutil.rmtree(request_dir)
+        print("valid image num is not enough")
+        exit()
+
+    train_dataset = DreamBoothDataset(
+        instance_data_root=config.instance_dir,
+        instance_prompt=config.instance_prompt,
+        class_data_root=config.class_data_dir if config.with_prior_preservation else None,
+        class_prompt=config.class_prompt,
+        tokenizer=tokenizer,
+        size=config.resolution,
+        center_crop=config.center_crop,
+    )  
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=5, shuffle=True, collate_fn=collate_fn, num_workers=0)
+    lr_scheduler = get_scheduler(
+        config.lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=config.lr_warmup_steps * config.gradient_accumulation_steps,
+        num_training_steps=config.max_train_steps * config.gradient_accumulation_steps,
+    )
+
+    accelerator.prepare(state['model'], state['karlo_prior']._prior, optimizer, train_dataloader, lr_scheduler)
+    
+    for epoch in range(config.num_train_epochs):
+        state['model'].train()
+        state['karlo_prior']._prior.train()
+        for step, batch in enumerate(train_dataloader):
+            with accelerator.accumulate(state['model']):
+                _ = batch
+
     #使用karlo提取的特征emb
     noise_level = 0 if state["model"].noise_augmentor is not None else None
     

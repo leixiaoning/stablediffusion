@@ -276,10 +276,10 @@ if __name__ == "__main__":
     use_karlo_prior = version in ["Stable unCLIP-L"] and st.checkbox("Use KARLO prior", False)
     use_karlo_prior = True # for debug using karlo
     state = init(version=version, load_karlo_prior=use_karlo_prior)
-    prompt = st.text_input("Prompt", "a professional photograph")
+    prompt = st.text_input("Prompt", "a cooking oil, 1L glass bottle, elements to reflect healthy food and the richness of nutritional value, (green, yellow, orange and other colors), materials with environmental protection and easy recycling, ((Perfectly-centered, beautiful, RAW photo, best quality,realistic, photo-realistic))")
     negative_prompt = st.text_input("Negative Prompt", "")
     scale = st.number_input("cfg-scale", value=10., min_value=-100., max_value=100.)
-    number_rows = st.number_input("num rows", value=2, min_value=1, max_value=10)
+    number_rows = st.number_input("num rows", value=3, min_value=1, max_value=10)
     number_cols = st.number_input("num cols", value=1, min_value=1, max_value=10)
     steps = st.sidebar.number_input("steps", value=20, min_value=1, max_value=1000)
     eta = st.sidebar.number_input("eta (DDIM)", value=0., min_value=0., max_value=1.)

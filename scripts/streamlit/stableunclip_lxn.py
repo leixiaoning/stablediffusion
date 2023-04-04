@@ -167,11 +167,11 @@ def sample(
                 
 
                 if not skip_single_save:
-                    base_count = len(os.listdir(os.path.join(SAVE_PATH, "samples")))
+                    base_count = len(os.listdir(os.path.join(SAVE_PATH, sub_dir)))
                     for x_sample in x_samples:
                         x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
                         Image.fromarray(x_sample.astype(np.uint8)).save(
-                            os.path.join(SAVE_PATH, "samples", f"{base_count:09}.png"))
+                            os.path.join(SAVE_PATH, sub_dir, f"{base_count:09}.png"))
                         base_count += 1
 
                 all_samples.append(x_samples)
@@ -183,7 +183,7 @@ def sample(
 
             # additionally, save grid
             grid = Image.fromarray((255. * grid.cpu().numpy()).astype(np.uint8))
-            if save_grid:
+            if False:#save_grid:
                 grid_count = len(os.listdir(SAVE_PATH)) - 1
                 grid.save(os.path.join(SAVE_PATH, f'grid-{grid_count:06}.png'))
 
@@ -288,7 +288,7 @@ def load_model_from_config(config, ckpt, verbose=False, vae_sd=None):
 
 if __name__ == "__main__":
     #配置
-    version = 'Stable unCLIP-L'
+    version = 'Stable unCLIP-L' # 'Stable unOpenCLIP-H'
     steps = 20 #采样步数
     
     #初始化模型
@@ -308,15 +308,26 @@ if __name__ == "__main__":
     seed_everything(2023)
 
     SAVE_PATH = os.path.join(SAVE_PATH, version)
-    os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
     
-    input_img = '/www/simple_ssd/lxn3/karlo/datatest/meiyan/dogcat/dog/'
+    input_img = '/www/simple_ssd/lxn3/karlo/datatest/317_2/reconstruct/'
+    global sub_dir
+    sub_dir = 'test1'
+    os.makedirs(os.path.join(SAVE_PATH, sub_dir), exist_ok=True)
+
     for imgi in os.listdir(input_img):
-        #直接使用 karlo的 img emb
-        imgpath = os.path.join(input_img, imgi) 
-        imginput = Image.open(imgpath).convert("RGB") # PIL
-        adm_cond = pipe_img_karlo._encode_image(image=imginput, device='cuda', num_images_per_prompt=1, image_embeddings=None)
+        #直接使用 karlo的 img emb     ([1, 768])
+        #imgpath = os.path.join(input_img, imgi) 
+        #imginput = Image.open(imgpath).convert("RGB") # PIL
+        #adm_cond = pipe_img_karlo._encode_image(image=imginput, device='cuda', num_images_per_prompt=1, image_embeddings=None)
         
+        #自身的img emb
+        imgpath = os.path.join(input_img, imgi)
+        image = load_img_local(imgpath)
+        image = repeat(image, '1 ... -> b ...', b=1)
+
+        adm_cond = state["model"].embedder(image.type(torch.float16).to('cuda'))
+
+
         if noise_level is not None: #对karlo提取的特征emb 加 随机噪声
             c_adm, noise_level_emb = state["model"].noise_augmentor(adm_cond, noise_level=repeat(
                         torch.tensor([noise_level]).to(state["model"].device), '1 -> b', b=1))
