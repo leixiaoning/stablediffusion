@@ -471,8 +471,8 @@ if __name__ == "__main__":
                     img, _ = outs
                     """
 
+                #torch.cuda.empty_cache()
                 samples_ddim = img
-                
                 x_samples = state["model"].decode_first_stage(samples_ddim) # decode (1, 4, 96, 96) -> (1, 3, 768, 768)
                 x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
                 
@@ -482,7 +482,7 @@ if __name__ == "__main__":
                 #x_samples2 = model.decode_first_stage(samples_ddim2)
                 
 
-                if True:
+                if True: #保存图片
                     base_count = len(os.listdir(os.path.join(SAVE_PATH, "samples")))
                     for x_sample in x_samples:
                         x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
