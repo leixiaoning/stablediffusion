@@ -314,7 +314,7 @@ if __name__ == "__main__":
         print("accelerator main process !!")
     #优化器
     optimizer_class = bnb.optim.AdamW8bit
-    params_to_optimize = (itertools.chain(state['model'].parameters(), 
+    params_to_optimize = (itertools.chain(state['model'].model.parameters(), 
                                 state['karlo_prior']._prior.parameters()))
     optimizer = optimizer_class(
         params_to_optimize,
@@ -377,19 +377,19 @@ if __name__ == "__main__":
         num_training_steps=config.max_train_steps * config.gradient_accumulation_steps,
     )
 
-    accelerator.prepare(state['model'], state['karlo_prior']._prior, optimizer, train_dataloader, lr_scheduler)
+    accelerator.prepare(state['model'].model, state['karlo_prior']._prior, optimizer, train_dataloader, lr_scheduler)
 
     shape=[4, 768 // 8, 768 // 8]
     SAVE_PATH = os.path.join(SAVE_PATH, version)
     os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
+    device = state['model'].betas.device
     seed_everything(2023)
     for epoch in range(config.num_train_epochs):
-        state['model'].train()
+        state['model'].model.train()
         state['karlo_prior']._prior.train()
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(state['model']):
+            with accelerator.accumulate(state['model'].model):
                 batchsize = 2*config.batchsize
-                device = state['model'].betas.device
                 sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)
                 img = torch.randn([batchsize]+shape, device=device)
                 timesteps = sampler.ddim_timesteps
@@ -414,7 +414,7 @@ if __name__ == "__main__":
                             c_in[k] = torch.cat([
                                     unconditional_conditioning[k],
                                     c[k]])
-                    model_uncond, model_t = state['model'].apply_model(x_in, t_in, c_in).chunk(2)
+                    model_uncond, model_t = state['model'].model(x_in, t_in, **c_in).chunk(2) # DiffusionWrapper
                     model_output = model_uncond + 10.0 * (model_t - model_uncond)
 
                     if state['model'].parameterization == "v":
