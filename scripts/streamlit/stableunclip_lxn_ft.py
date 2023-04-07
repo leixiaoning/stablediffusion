@@ -375,9 +375,7 @@ if __name__ == "__main__":
 
     accelerator.prepare(state['model'], state['karlo_prior']._prior, optimizer, train_dataloader, lr_scheduler)
 
-    t_progress = st.progress(0)
-    def t_callback(t):
-        t_progress.progress(min((t + 1) / steps, 1.))
+    
 
     SAVE_PATH = os.path.join(SAVE_PATH, version)
     os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
@@ -390,14 +388,14 @@ if __name__ == "__main__":
             with accelerator.accumulate(state['model']):
                 samples_ddim, _ = sampler.sample(S=steps,
                                                  conditioning=batch['img_emb']['c'],
-                                                 batch_size=1,
+                                                 batch_size=2*config.batchsize,
                                                  shape=[4, 768 // 8, 768 // 8],
                                                  verbose=False,
                                                  unconditional_guidance_scale=10.0,
-                                                 unconditional_conditioning=batch['img_emb']['c'],
+                                                 unconditional_conditioning=batch['img_emb']['uc'],
                                                  eta=0.0,
                                                  x_T=None,
-                                                 callback=t_callback,
+                                                 callback=None,
                                                  ucg_schedule=None
                                                  ) # 扩散过程
                 x_samples = state["model"].decode_first_stage(samples_ddim) # decode (1, 4, 96, 96) -> (1, 3, 768, 768)
