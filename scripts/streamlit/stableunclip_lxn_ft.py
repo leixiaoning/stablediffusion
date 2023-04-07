@@ -390,23 +390,7 @@ if __name__ == "__main__":
         state['karlo_prior']._prior.train()
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(state['model']):
-                
-                
                 batchsize = 2*config.batchsize
-                """
-                samples_ddim, _ = sampler.sample(S=steps,
-                                                 conditioning=batch['img_emb']['c'],
-                                                 batch_size=batchsize,
-                                                 shape=shape,
-                                                 verbose=False,
-                                                 unconditional_guidance_scale=10.0,
-                                                 unconditional_conditioning=batch['img_emb']['uc'],
-                                                 eta=0.0,
-                                                 x_T=None,
-                                                 callback=None,
-                                                 ucg_schedule=None
-                                                 ) # 扩散过程
-                """
                 device = state['model'].betas.device
                 sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)
                 img = torch.randn([batchsize]+shape, device=device)
@@ -461,16 +445,7 @@ if __name__ == "__main__":
                     x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
 
                     img = x_prev
-                    """
-                    outs = sampler.p_sample_ddim(img, batch['img_emb']['c'], ts, index=index,
-                                    use_original_steps=False, quantize_denoised=False,
-                                    temperature=1.0, noise_dropout=0.0, score_corrector=None,
-                                    corrector_kwargs=None, unconditional_guidance_scale=10.0,
-                                    unconditional_conditioning=batch['img_emb']['uc'], 
-                                    dynamic_threshold=None)
-                    img, _ = outs
-                    """
-
+                    
                 #torch.cuda.empty_cache()
                 samples_ddim = img
                 x_samples = state["model"].decode_first_stage(samples_ddim) # decode (1, 4, 96, 96) -> (1, 3, 768, 768)
