@@ -297,24 +297,22 @@ def load_model_from_config(config, ckpt, verbose=False, vae_sd=None):
 
 
 if __name__ == "__main__":
-    #配置
     version = 'Stable unCLIP-L'
     steps = 20 #采样步数
-    
     #初始化模型
     state = init(version=version, load_karlo_prior=True)
     pipe_img_karlo = DiffusionPipeline.from_pretrained("/www/simple_ssd/lxn3/mtimageblend/plugins/imageblend/models/karlo-v1-alpha-image-variations", \
             torch_dtype=torch.float16, custom_pipeline='src/unclip_image_interpolation_lxn.py')
     pipe_img_karlo.to('cuda')    
     sampler = DDIMSampler(state["model"])
-
+    #这里模型都已经在cuda上,且requires_grad都是true
     ###########
-    tokenizer = state["karlo_prior"]._tokenizer
     config = FTConfig()
+    tokenizer = state["karlo_prior"]._tokenizer
     accelerator = Accelerator(mixed_precision='fp16', log_with="tensorboard", logging_dir='cache/log')
     if accelerator.is_main_process:
-        #os.makedirs('', exist_ok=True)
         print("accelerator main process !!")
+    #优化器
     optimizer_class = bnb.optim.AdamW8bit
     params_to_optimize = (itertools.chain(state['model'].parameters(), 
                                 state['karlo_prior']._prior.parameters()))
@@ -325,6 +323,7 @@ if __name__ == "__main__":
         weight_decay=0.01,
         eps=1e-8,
     )
+    #数据处理
     request_dir = 'cache/tmp_data/'
     instance_dir = os.path.join(request_dir, 'instance_data')
     
@@ -370,6 +369,7 @@ if __name__ == "__main__":
         sd_model=state["model"]
     )  
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=config.batchsize, shuffle=True, collate_fn=collate_fn, num_workers=0)
+    ######
     lr_scheduler = get_scheduler(
         config.lr_scheduler,
         optimizer=optimizer,
@@ -380,11 +380,9 @@ if __name__ == "__main__":
     accelerator.prepare(state['model'], state['karlo_prior']._prior, optimizer, train_dataloader, lr_scheduler)
 
     shape=[4, 768 // 8, 768 // 8]
-
     SAVE_PATH = os.path.join(SAVE_PATH, version)
     os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
     seed_everything(2023)
-    
     for epoch in range(config.num_train_epochs):
         state['model'].train()
         state['karlo_prior']._prior.train()
