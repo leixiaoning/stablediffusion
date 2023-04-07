@@ -24,6 +24,10 @@ import bitsandbytes as bnb
 import itertools
 from diffusers.optimization import get_scheduler
 import json as js
+from tqdm import tqdm
+from ldm.modules.diffusionmodules.util import noise_like
+
+
 torch.set_grad_enabled(False)
 
 PROMPTS_ROOT = "scripts/prompts/"
@@ -375,7 +379,7 @@ if __name__ == "__main__":
 
     accelerator.prepare(state['model'], state['karlo_prior']._prior, optimizer, train_dataloader, lr_scheduler)
 
-    
+    shape=[4, 768 // 8, 768 // 8]
 
     SAVE_PATH = os.path.join(SAVE_PATH, version)
     os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
@@ -386,10 +390,14 @@ if __name__ == "__main__":
         state['karlo_prior']._prior.train()
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(state['model']):
+                
+                
+                batchsize = 2*config.batchsize
+                """
                 samples_ddim, _ = sampler.sample(S=steps,
                                                  conditioning=batch['img_emb']['c'],
-                                                 batch_size=2*config.batchsize,
-                                                 shape=[4, 768 // 8, 768 // 8],
+                                                 batch_size=batchsize,
+                                                 shape=shape,
                                                  verbose=False,
                                                  unconditional_guidance_scale=10.0,
                                                  unconditional_conditioning=batch['img_emb']['uc'],
@@ -398,6 +406,73 @@ if __name__ == "__main__":
                                                  callback=None,
                                                  ucg_schedule=None
                                                  ) # 扩散过程
+                """
+                device = state['model'].betas.device
+                sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)
+                img = torch.randn([batchsize]+shape, device=device)
+                timesteps = sampler.ddim_timesteps
+                time_range = np.flip(timesteps)
+                total_steps = timesteps.shape[0]
+                iterator = tqdm(time_range, desc='DDIM Sampler', total=total_steps)
+                for i, step in enumerate(iterator):
+                    index = total_steps - i - 1
+                    ts = torch.full((batchsize,), step, device=device, dtype=torch.long)
+                    
+                    c = batch['img_emb']['c']
+                    unconditional_conditioning = batch['img_emb']['uc']
+                    x_in = torch.cat([img] * 2)
+                    t_in = torch.cat([ts] * 2)
+                    c_in = dict()
+                    for k in c:
+                        if isinstance(c[k], list):
+                            c_in[k] = [torch.cat([
+                                unconditional_conditioning[k][i],
+                                c[k][i]]) for i in range(len(c[k]))]
+                        else:
+                            c_in[k] = torch.cat([
+                                    unconditional_conditioning[k],
+                                    c[k]])
+                    model_uncond, model_t = state['model'].apply_model(x_in, t_in, c_in).chunk(2)
+                    model_output = model_uncond + 10.0 * (model_t - model_uncond)
+
+                    if state['model'].parameterization == "v":
+                        e_t = state['model'].predict_eps_from_z_and_v(img, ts, model_output)
+                    else:
+                        e_t = model_output
+
+                    alphas = sampler.ddim_alphas
+                    alphas_prev = sampler.ddim_alphas_prev
+                    sqrt_one_minus_alphas = sampler.ddim_sqrt_one_minus_alphas
+                    sigmas = sampler.ddim_sigmas
+
+                    a_t = torch.full((batchsize, 1, 1, 1), alphas[index], device=device)
+                    a_prev = torch.full((batchsize, 1, 1, 1), alphas_prev[index], device=device)
+                    sigma_t = torch.full((batchsize, 1, 1, 1), sigmas[index], device=device)
+                    sqrt_one_minus_at = torch.full((batchsize, 1, 1, 1), sqrt_one_minus_alphas[index],device=device)
+
+                    if state['model'].parameterization != "v":
+                        pred_x0 = (img - sqrt_one_minus_at * e_t) / a_t.sqrt()
+                    else:
+                        pred_x0 = state['model'].predict_start_from_z_and_v(img, ts, model_output)
+
+                    dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
+                    noise = sigma_t * noise_like(img.shape, device, False) * 1.0
+
+                    x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
+
+                    img = x_prev
+                    """
+                    outs = sampler.p_sample_ddim(img, batch['img_emb']['c'], ts, index=index,
+                                    use_original_steps=False, quantize_denoised=False,
+                                    temperature=1.0, noise_dropout=0.0, score_corrector=None,
+                                    corrector_kwargs=None, unconditional_guidance_scale=10.0,
+                                    unconditional_conditioning=batch['img_emb']['uc'], 
+                                    dynamic_threshold=None)
+                    img, _ = outs
+                    """
+
+                samples_ddim = img
+                
                 x_samples = state["model"].decode_first_stage(samples_ddim) # decode (1, 4, 96, 96) -> (1, 3, 768, 768)
                 x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
                 
