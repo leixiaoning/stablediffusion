@@ -93,10 +93,10 @@ def get_init_img(batch_size=1, key=None):
 def sample(
         model,
         prompt,#基于prompt生成的context引导，在unet里面使用，不影响效果
-        n_runs=3,
-        n_samples=2,
-        H=512,
-        W=512,
+        n_runs=1,
+        n_samples=1,
+        H=768,
+        W=768,
         C=4,
         f=8,
         scale=10.0,
@@ -303,7 +303,8 @@ if __name__ == "__main__":
             torch_dtype=torch.float16, custom_pipeline='src/unclip_image_interpolation_lxn.py')
     pipe_img_karlo.to('cuda')    
     sampler = DDIMSampler(state["model"])
-    
+
+    ###########
     tokenizer = state["karlo_prior"]._tokenizer
     config = FTConfig()
     accelerator = Accelerator(mixed_precision='fp16', log_with="tensorboard", logging_dir='cache/log')
@@ -352,15 +353,19 @@ if __name__ == "__main__":
         exit()
 
     train_dataset = DreamBoothDataset(
-        instance_data_root=config.instance_dir,
+        instance_data_root=instance_dir,
         instance_prompt=config.instance_prompt,
         class_data_root=config.class_data_dir if config.with_prior_preservation else None,
         class_prompt=config.class_prompt,
         tokenizer=tokenizer,
         size=config.resolution,
         center_crop=config.center_crop,
+        text_max_length=state['karlo_prior']._prior.model.text_ctx,
+        img_guide=True,
+        pipe_img_karlo=pipe_img_karlo,
+        sd_model=state["model"]
     )  
-    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=5, shuffle=True, collate_fn=collate_fn, num_workers=0)
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=config.batchsize, shuffle=True, collate_fn=collate_fn, num_workers=0)
     lr_scheduler = get_scheduler(
         config.lr_scheduler,
         optimizer=optimizer,
@@ -369,54 +374,52 @@ if __name__ == "__main__":
     )
 
     accelerator.prepare(state['model'], state['karlo_prior']._prior, optimizer, train_dataloader, lr_scheduler)
+
+    t_progress = st.progress(0)
+    def t_callback(t):
+        t_progress.progress(min((t + 1) / steps, 1.))
+
+    SAVE_PATH = os.path.join(SAVE_PATH, version)
+    os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
+    seed_everything(2023)
     
     for epoch in range(config.num_train_epochs):
         state['model'].train()
         state['karlo_prior']._prior.train()
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(state['model']):
-                _ = batch
+                samples_ddim, _ = sampler.sample(S=steps,
+                                                 conditioning=batch['img_emb']['c'],
+                                                 batch_size=1,
+                                                 shape=[4, 768 // 8, 768 // 8],
+                                                 verbose=False,
+                                                 unconditional_guidance_scale=10.0,
+                                                 unconditional_conditioning=batch['img_emb']['c'],
+                                                 eta=0.0,
+                                                 x_T=None,
+                                                 callback=t_callback,
+                                                 ucg_schedule=None
+                                                 ) # 扩散过程
+                x_samples = state["model"].decode_first_stage(samples_ddim) # decode (1, 4, 96, 96) -> (1, 3, 768, 768)
+                x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
+                
+                #image = load_img_local('/www/simple_ssd/lxn3/karlo/datatest/317_2/style/starry_night.jpeg')
+                #image = image.type(x_samples.dtype).to(x_samples.device)
+                #samples_ddim2 = model.get_first_stage_encoding(model.encode_first_stage(image))
+                #x_samples2 = model.decode_first_stage(samples_ddim2)
+                
 
-    #使用karlo提取的特征emb
-    noise_level = 0 if state["model"].noise_augmentor is not None else None
+                if True:
+                    base_count = len(os.listdir(os.path.join(SAVE_PATH, "samples")))
+                    for x_sample in x_samples:
+                        x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                        Image.fromarray(x_sample.astype(np.uint8)).save(
+                            os.path.join(SAVE_PATH, "samples", f"{base_count:09}.png"))
+                        base_count += 1
+
     
-    t_progress = st.progress(0)
-    def t_callback(t):
-        t_progress.progress(min((t + 1) / steps, 1.))
 
-    seed_everything(2023)
-
-    SAVE_PATH = os.path.join(SAVE_PATH, version)
-    os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
     
-    input_img = '/www/simple_ssd/lxn3/karlo/datatest/meiyan/dogcat/dog/'
-    for imgi in os.listdir(input_img):
-        #直接使用 karlo的 img emb
-        imgpath = os.path.join(input_img, imgi) 
-        imginput = Image.open(imgpath).convert("RGB") # PIL
-        adm_cond = pipe_img_karlo._encode_image(image=imginput, device='cuda', num_images_per_prompt=1, image_embeddings=None)
+    
+    
         
-        if noise_level is not None: #对karlo提取的特征emb 加 随机噪声
-            c_adm, noise_level_emb = state["model"].noise_augmentor(adm_cond, noise_level=repeat(
-                        torch.tensor([noise_level]).to(state["model"].device), '1 -> b', b=1))
-            adm_cond = torch.cat((adm_cond, noise_level_emb), 1) # noise_level_emb 是 positional embeddings
-            #adm_cond = torch.cat((c_adm, noise_level_emb), 1)
-        adm_uc = torch.zeros_like(adm_cond)
-        
-        # 开始扩散模型
-        samples = sample(
-                    state["model"],
-                    "",#prompt
-                    n_runs=1,
-                    n_samples=1,
-                    H=768, W=768, C=4, f=8,
-                    scale=10.0,
-                    ddim_steps=steps,
-                    ddim_eta=0.0,
-                    callback=t_callback,
-                    ucg_schedule=None,
-                    negative_prompt='',
-                    adm_cond=adm_cond, adm_uc=adm_uc,
-                    use_full_precision=False,
-                    only_adm_cond=False
-                )

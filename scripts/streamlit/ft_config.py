@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 import base64
 import urllib
+from einops import repeat
 
 mtface = None
 
@@ -31,8 +32,9 @@ class FTConfig(object):
         self.max_train_steps = 200
         self.num_train_epochs = 1
         self.face_detect = False
+        self.batchsize = 5
 
-def collate_fn(examples, tokenizer, with_prior_preservation=True): #dataset 后处理 函数
+def collate_fn(examples, tokenizer=None, with_prior_preservation=True): #dataset 后处理 函数
     input_ids = [example["instance_prompt_ids"] for example in examples]
     pixel_values = [example["instance_images"] for example in examples]
 
@@ -45,17 +47,48 @@ def collate_fn(examples, tokenizer, with_prior_preservation=True): #dataset 后�
     pixel_values = torch.stack(pixel_values)
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-    input_ids = tokenizer.pad(
-            {"input_ids": input_ids},
-            padding="max_length",
-            max_length=tokenizer.model_max_length,
-            return_tensors="pt",
-        ).input_ids
+    input_ids = torch.stack(input_ids).squeeze(1).type(torch.int64)
 
     batch = {
             "input_ids": input_ids,
             "pixel_values": pixel_values,
         }
+
+    if 'instance_img_emb' in examples[0]:
+        ins_img_embs = [example["instance_img_emb"] for example in examples]
+        
+        adm_cond = torch.cat([ins_img_emb['c']['c_adm'] for ins_img_emb in ins_img_embs])
+        adm_uc = torch.cat([ins_img_emb['uc']['c_adm'] for ins_img_emb in ins_img_embs])
+        
+        c = torch.cat([ins_img_emb['c']['c_crossattn'][0] for ins_img_emb in ins_img_embs])
+        uc = torch.cat([ins_img_emb['uc']['c_crossattn'][0] for ins_img_emb in ins_img_embs])
+        
+        c = {"c_crossattn": [c], "c_adm": adm_cond}
+        uc = {"c_crossattn": [uc], "c_adm": adm_uc}
+        
+        batch['img_emb'] = {'c':c, 'uc':uc}
+
+        if 'class_img_emb' in examples[0]:
+            class_img_embs = [example["class_img_emb"] for example in examples]
+        
+            adm_cond = torch.cat([class_img_emb['c']['c_adm'] for class_img_emb in class_img_embs])
+            adm_cond = torch.cat([batch['img_emb']['c']['c_adm'], adm_cond])
+            
+            adm_uc = torch.cat([class_img_emb['uc']['c_adm'] for class_img_emb in class_img_embs])
+            adm_uc = torch.cat([batch['img_emb']['uc']['c_adm'], adm_uc])
+
+            c = torch.cat([class_img_emb['c']['c_crossattn'][0] for class_img_emb in class_img_embs])
+            c = torch.cat([batch['img_emb']['c']['c_crossattn'][0], c])
+
+            uc = torch.cat([class_img_emb['uc']['c_crossattn'][0] for class_img_emb in class_img_embs])
+            uc = torch.cat([batch['img_emb']['uc']['c_crossattn'][0], uc])
+
+            c = {"c_crossattn": [c], "c_adm": adm_cond}
+            uc = {"c_crossattn": [uc], "c_adm": adm_uc}
+            
+
+            batch['img_emb'] = {'c':c, 'uc':uc}
+
     return batch
 
 class DreamBoothDataset(Dataset):
@@ -73,10 +106,19 @@ class DreamBoothDataset(Dataset):
         class_prompt=None,
         size=512,
         center_crop=False,
+        text_max_length=77,
+        img_guide=False,
+        pipe_img_karlo=None,
+        sd_model=None
     ):
         self.size = size
         self.center_crop = center_crop
         self.tokenizer = tokenizer
+        self.text_max_length = text_max_length
+        self.img_guide = img_guide and (pipe_img_karlo!=None) and (sd_model!=None)
+        self.pipe_img_karlo = pipe_img_karlo
+        self.sd_model = sd_model
+
 
         self.instance_data_root = Path(instance_data_root)
         if not self.instance_data_root.exists():
@@ -166,24 +208,46 @@ class DreamBoothDataset(Dataset):
 
         instance_image = self.get_face_image(instance_image, instance_box, instance_roll, instance_image.width, instance_image.height)
         example["instance_images"] = self.image_transforms(instance_image)
-        example["instance_prompt_ids"] = self.tokenizer(
-            self.instance_prompt,
-            padding="do_not_pad",
-            truncation=True,
-            max_length=self.tokenizer.model_max_length,
-        ).input_ids
+        tok, mask = self.tokenizer.padded_tokens_and_mask([self.instance_prompt], self.text_max_length)
+        example["instance_prompt_ids"] = tok#[mask]
 
         if self.class_data_root:
             class_image = Image.open(self.class_images_path[index % self.num_class_images])
             if not class_image.mode == "RGB":
                 class_image = class_image.convert("RGB")
             example["class_images"] = self.image_transforms(class_image)
-            example["class_prompt_ids"] = self.tokenizer(
-                self.class_prompt,
-                padding="do_not_pad",
-                truncation=True,
-                max_length=self.tokenizer.model_max_length,
-            ).input_ids
+            tok, mask = self.tokenizer.padded_tokens_and_mask([self.class_prompt], self.text_max_length)
+            example["class_prompt_ids"] = tok#[mask]
+
+        if self.img_guide:
+            adm_cond = self.pipe_img_karlo._encode_image(image=instance_image, device='cuda', num_images_per_prompt=1, image_embeddings=None)
+            _, noise_level_emb = self.sd_model.noise_augmentor(adm_cond, noise_level=repeat(
+                        torch.tensor([0]).to(self.sd_model.device), '1 -> b', b=1))
+            adm_cond = torch.cat((adm_cond, noise_level_emb), 1)
+            adm_uc = torch.zeros_like(adm_cond)
+            
+            uc = self.sd_model.get_learned_conditioning([''])
+            c =  self.sd_model.get_learned_conditioning([''])
+
+            c = {"c_crossattn": [c], "c_adm": adm_cond}
+            uc = {"c_crossattn": [uc], "c_adm": adm_uc}
+
+            example['instance_img_emb'] = {'c':c, 'uc':uc}
+
+            if self.class_data_root:
+                adm_cond = self.pipe_img_karlo._encode_image(image=class_image, device='cuda', num_images_per_prompt=1, image_embeddings=None)
+                _, noise_level_emb = self.sd_model.noise_augmentor(adm_cond, noise_level=repeat(
+                        torch.tensor([0]).to(self.sd_model.device), '1 -> b', b=1))
+                adm_cond = torch.cat((adm_cond, noise_level_emb), 1)
+                adm_uc = torch.zeros_like(adm_cond)
+
+                uc = self.sd_model.get_learned_conditioning([''])
+                c =  self.sd_model.get_learned_conditioning([''])
+
+                c = {"c_crossattn": [c], "c_adm": adm_cond}
+                uc = {"c_crossattn": [uc], "c_adm": adm_uc}
+                
+                example['class_img_emb'] = {'c':c, 'uc':uc}
 
         return example
 

@@ -288,7 +288,7 @@ def load_model_from_config(config, ckpt, verbose=False, vae_sd=None):
 
 if __name__ == "__main__":
     #配置
-    version = 'Stable unCLIP-L' # 'Stable unOpenCLIP-H'
+    version = 'Stable unCLIP-L' # 'Stable unOpenCLIP-H'   'Stable unCLIP-L'
     steps = 20 #采样步数
     
     #初始化模型
@@ -311,7 +311,7 @@ if __name__ == "__main__":
     
     input_img = '/www/simple_ssd/lxn3/karlo/datatest/317_2/reconstruct/'
     global sub_dir
-    sub_dir = 'testkarlo'
+    sub_dir = 'testtmp1_no'
     os.makedirs(os.path.join(SAVE_PATH, sub_dir), exist_ok=True)
 
     for imgi in os.listdir(input_img):
