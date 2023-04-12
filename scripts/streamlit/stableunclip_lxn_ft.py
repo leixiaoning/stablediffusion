@@ -314,8 +314,8 @@ if __name__ == "__main__":
         print("accelerator main process !!")
     #优化器
     optimizer_class = bnb.optim.AdamW8bit
-    params_to_optimize = (itertools.chain(state['model'].model.parameters(), 
-                                state['karlo_prior']._prior.parameters()))
+    params_to_optimize = (itertools.chain(state['model'].model.parameters())) 
+                                #, state['karlo_prior']._prior.parameters()))
     optimizer = optimizer_class(
         params_to_optimize,
         lr=3.5075e-06,
@@ -366,7 +366,8 @@ if __name__ == "__main__":
         text_max_length=state['karlo_prior']._prior.model.text_ctx,
         img_guide=True,
         pipe_img_karlo=pipe_img_karlo,
-        sd_model=state["model"]
+        sd_model=state["model"],
+        karlo_prior_model=state["karlo_prior"],
     )  
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=config.batchsize, shuffle=True, collate_fn=collate_fn, num_workers=0)
     ######
@@ -377,7 +378,7 @@ if __name__ == "__main__":
         num_training_steps=config.max_train_steps * config.gradient_accumulation_steps,
     )
 
-    accelerator.prepare(state['model'].model, state['karlo_prior']._prior, optimizer, train_dataloader, lr_scheduler)
+    accelerator.prepare(state['model'].model, optimizer, train_dataloader, lr_scheduler)#state['karlo_prior']._prior
 
     shape=[4, 768 // 8, 768 // 8]
     SAVE_PATH = os.path.join(SAVE_PATH, version)
@@ -386,9 +387,15 @@ if __name__ == "__main__":
     seed_everything(2023)
     for epoch in range(config.num_train_epochs):
         state['model'].model.train()
-        state['karlo_prior']._prior.train()
+        #state['karlo_prior']._prior.train()
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(state['model'].model):
+
+                text_emb = batch['text_emb']
+                img_emb = batch['img_emb']
+                pixels = batch['pixel_values']
+                emb = img_emb
+
                 batchsize = 2*config.batchsize
                 sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)
                 img = torch.randn([batchsize]+shape, device=device)
@@ -400,8 +407,8 @@ if __name__ == "__main__":
                     index = total_steps - i - 1
                     ts = torch.full((batchsize,), step, device=device, dtype=torch.long)
                     
-                    c = batch['img_emb']['c']
-                    unconditional_conditioning = batch['img_emb']['uc']
+                    c = emb['c']
+                    unconditional_conditioning = emb['uc']
                     x_in = torch.cat([img] * 2)
                     t_in = torch.cat([ts] * 2)
                     c_in = dict()
