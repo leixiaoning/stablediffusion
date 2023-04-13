@@ -26,7 +26,7 @@ from diffusers.optimization import get_scheduler
 import json as js
 from tqdm import tqdm
 from ldm.modules.diffusionmodules.util import noise_like
-
+import torch.nn.functional as F
 
 torch.set_grad_enabled(False)
 
@@ -387,6 +387,7 @@ if __name__ == "__main__":
     seed_everything(2023)
     sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)# 初始化一些参数
     batchsize = 2*config.batchsize
+    global_step = 0
     for epoch in range(config.num_train_epochs):
         state['model'].model.train()
         #state['karlo_prior']._prior.train()
@@ -409,53 +410,30 @@ if __name__ == "__main__":
                 model_uncond, model_t = state['model'].model(x_in, t_in, **c_in).chunk(2) # DiffusionWrapper
                 noise, noise_prior = noise.chunk(2)
                 
-
-
-                model_output = model_uncond + 10.0 * (model_t - model_uncond)
-                #denoise
-                if state['model'].parameterization == "v":
-                    e_t = state['model'].predict_eps_from_z_and_v(latents, timesteps, model_output)
-                else:
-                    e_t = model_output
-
-                a_t = sampler.alphas_cumprod[timesteps][:,None,None,None]
-                a_prev = sampler.alphas_cumprod[timesteps-1][:,None,None,None] # -1 会是个例外
-                sigma_t =  0.0 * torch.sqrt((1 - a_prev) / (1 - a_t) * (1 - a_t / a_prev))
-                sqrt_one_minus_at = torch.sqrt(1. - a_t)
-
-                if state['model'].parameterization != "v":
-                    pred_x0 = (latents - sqrt_one_minus_at * e_t) / a_t.sqrt()
-                else:
-                    pred_x0 = state['model'].predict_start_from_z_and_v(latents, timesteps, model_output)
-
-                dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
-                noise = sigma_t * noise_like(latents.shape, device, False) * 1.0
-
-                x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
-                # x_prev 和 latents 做loss
-
-
-
-
+                loss1 = F.mse_loss(model_uncond.float(), noise.float(), reduction="mean")
+                loss2 = F.mse_loss(model_t.float(), noise_prior.float(), reduction="mean")
+                loss = loss1 + 1.0 * loss2
                 
-                #torch.cuda.empty_cache()
-                samples_ddim = x_prev
-                x_samples = state["model"].decode_first_stage(samples_ddim) # decode (1, 4, 96, 96) -> (1, 3, 768, 768)
-                x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
-                
-                #image = load_img_local('/www/simple_ssd/lxn3/karlo/datatest/317_2/style/starry_night.jpeg')
-                #image = image.type(x_samples.dtype).to(x_samples.device)
-                #samples_ddim2 = model.get_first_stage_encoding(model.encode_first_stage(image))
-                #x_samples2 = model.decode_first_stage(samples_ddim2)
-                
+                accelerator.backward(loss.contiguous())
+                if accelerator.sync_gradients:
+                    params_to_clip = (state['model'].model.parameters())
+                    accelerator.clip_grad_norm_(params_to_clip, 1.0)
+                    global_step += 1
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad(set_to_none=config.set_grads_to_none)#梯度清零或者清为None，后者可以节省显存
 
-                if True: #保存图片
-                    base_count = len(os.listdir(os.path.join(SAVE_PATH, "samples")))
-                    for x_sample in x_samples:
-                        x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                        Image.fromarray(x_sample.astype(np.uint8)).save(
-                            os.path.join(SAVE_PATH, "samples", f"{base_count:09}.png"))
-                        base_count += 1
+            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            accelerator.log(logs, step=global_step)
+
+            if global_step >= config.max_train_steps:
+                break
+            
+        accelerator.wait_for_everyone()
+
+    if accelerator.is_main_process:
+        pass # 保存模型
+    accelerator.end_training()
 
     
 

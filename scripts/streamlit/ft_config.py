@@ -35,6 +35,8 @@ class FTConfig(object):
         self.face_detect = False
         self.batchsize = 2 #5
         self.text_prior_timestep = 25
+        
+        self.set_grads_to_none = False
 
 def collate_fn(examples, tokenizer=None, with_prior_preservation=True): #dataset 后处理 函数
     ins_text_embs = [example["instance_text_emb"] for example in examples]
