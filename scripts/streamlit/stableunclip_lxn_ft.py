@@ -296,37 +296,8 @@ def load_model_from_config(config, ckpt, verbose=False, vae_sd=None):
     return model, msg
 
 
-if __name__ == "__main__":
-    version = 'Stable unCLIP-L'
-    steps = 20 #采样步数
-    #初始化模型
-    state = init(version=version, load_karlo_prior=True)
-    pipe_img_karlo = DiffusionPipeline.from_pretrained("/www/simple_ssd/lxn3/mtimageblend/plugins/imageblend/models/karlo-v1-alpha-image-variations", \
-            torch_dtype=torch.float16, custom_pipeline='src/unclip_image_interpolation_lxn.py')
-    pipe_img_karlo.to('cuda')    
-    sampler = DDIMSampler(state["model"])
-    #这里模型都已经在cuda上,且requires_grad都是true
-    ###########
-    config = FTConfig()
-    tokenizer = state["karlo_prior"]._tokenizer
-    accelerator = Accelerator(mixed_precision='fp16', log_with="tensorboard", logging_dir='cache/log')
-    if accelerator.is_main_process:
-        print("accelerator main process !!")
-    #优化器
-    optimizer_class = bnb.optim.AdamW8bit
-    params_to_optimize = (itertools.chain(state['model'].model.parameters())) 
-                                #, state['karlo_prior']._prior.parameters()))
-    optimizer = optimizer_class(
-        params_to_optimize,
-        lr=3.5075e-06,
-        betas=(0.9, 0.999),
-        weight_decay=0.01,
-        eps=1e-8,
-    )
-    #数据处理
-    request_dir = 'cache/tmp_data/'
+def process_data(config, request_dir = 'cache/tmp_data/'):
     instance_dir = os.path.join(request_dir, 'instance_data')
-    
     n_valid_image = 0
     if os.path.exists(config.instance_dir):
         imgs = os.listdir(config.instance_dir)
@@ -334,7 +305,6 @@ if __name__ == "__main__":
             imgi = imgs[i]
             d = os.path.join(config.instance_dir, imgi)
             user_image, image_error_flag = load_image(d, 'jpg')
-
             if not image_error_flag:
                 if config.face_detect:
                     face_image, box, roll = resize_image(user_image)
@@ -348,6 +318,7 @@ if __name__ == "__main__":
                                       encoding='utf-8') as f:
                         js.dump({"image": str(i) + ".jpg", "box": box, "roll": float(roll)}, f)
                     n_valid_image += 1
+
     if n_valid_image <= 0:
         if os.path.exists(request_dir):
             import shutil
@@ -355,12 +326,26 @@ if __name__ == "__main__":
         print("valid image num is not enough")
         exit()
 
+    return instance_dir        
+
+if __name__ == "__main__":
+    version = 'Stable unCLIP-L'
+    steps = 20 #采样步数
+    #初始化模型
+    state = init(version=version, load_karlo_prior=True)
+    pipe_img_karlo = DiffusionPipeline.from_pretrained("/www/simple_ssd/lxn3/mtimageblend/plugins/imageblend/models/karlo-v1-alpha-image-variations", \
+            torch_dtype=torch.float16, custom_pipeline='src/unclip_image_interpolation_lxn.py')
+    pipe_img_karlo.to('cuda')    
+    sampler = DDIMSampler(state["model"])
+    #这里模型都已经在cuda上,且requires_grad都是true
+    config = FTConfig()
+    instance_dir = process_data(config)#数据处理
     train_dataset = DreamBoothDataset(
         instance_data_root=instance_dir,
         instance_prompt=config.instance_prompt,
         class_data_root=config.class_data_dir if config.with_prior_preservation else None,
         class_prompt=config.class_prompt,
-        tokenizer=tokenizer,
+        tokenizer=None,#state["karlo_prior"]._tokenizer,
         size=config.resolution,
         center_crop=config.center_crop,
         text_max_length=state['karlo_prior']._prior.model.text_ctx,
@@ -371,6 +356,22 @@ if __name__ == "__main__":
     )  
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=config.batchsize, shuffle=True, collate_fn=collate_fn, num_workers=0)
     ######
+    accelerator = Accelerator(gradient_accumulation_steps=config.gradient_accumulation_steps, 
+            mixed_precision='fp16', log_with="tensorboard", logging_dir='cache/log')
+    if accelerator.is_main_process:
+        print("accelerator main process !!")
+    #优化器
+    optimizer_class = bnb.optim.AdamW8bit
+    params_to_optimize = (state['model'].model.parameters())
+                                #, state['karlo_prior']._prior.parameters()))
+    optimizer = optimizer_class(
+        params_to_optimize,
+        lr=3.5075e-06,
+        betas=(0.9, 0.999),
+        weight_decay=0.01,
+        eps=1e-8,
+    )
+
     lr_scheduler = get_scheduler(
         config.lr_scheduler,
         optimizer=optimizer,
@@ -381,13 +382,11 @@ if __name__ == "__main__":
     accelerator.prepare(state['model'].model, optimizer, train_dataloader, lr_scheduler)#state['karlo_prior']._prior
 
     shape=[4, 768 // 8, 768 // 8]
-    SAVE_PATH = os.path.join(SAVE_PATH, version)
-    os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
     device = state['model'].betas.device
-    seed_everything(2023)
-    sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)# 初始化一些参数
     batchsize = 2*config.batchsize
     global_step = 0
+    sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)# 初始化一些参数
+    seed_everything(2023)
     for epoch in range(config.num_train_epochs):
         state['model'].model.train()
         #state['karlo_prior']._prior.train()
@@ -410,11 +409,12 @@ if __name__ == "__main__":
                 model_uncond, model_t = state['model'].model(x_in, t_in, **c_in).chunk(2) # DiffusionWrapper
                 noise, noise_prior = noise.chunk(2)
                 
-                loss1 = F.mse_loss(model_uncond.float(), noise.float(), reduction="mean")
+                loss1 = F.mse_loss(model_uncond.float(), noise.float(), reduction="none").mean(
+                        [1, 2, 3]).mean()
                 loss2 = F.mse_loss(model_t.float(), noise_prior.float(), reduction="mean")
                 loss = loss1 + 1.0 * loss2
                 
-                accelerator.backward(loss.contiguous())
+                loss.backward() #accelerator.backward(loss.contiguous())
                 if accelerator.sync_gradients:
                     params_to_clip = (state['model'].model.parameters())
                     accelerator.clip_grad_norm_(params_to_clip, 1.0)
@@ -428,7 +428,7 @@ if __name__ == "__main__":
 
             if global_step >= config.max_train_steps:
                 break
-            
+
         accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:

@@ -37,6 +37,7 @@ class FTConfig(object):
         self.text_prior_timestep = 25
         
         self.set_grads_to_none = False
+        
 
 def collate_fn(examples, tokenizer=None, with_prior_preservation=True): #dataset 后处理 函数
     ins_text_embs = [example["instance_text_emb"] for example in examples]
@@ -231,6 +232,7 @@ class DreamBoothDataset(Dataset):
     def __len__(self):
         return self._length
 
+    @torch.no_grad()
     def __getitem__(self, index):
         example = {}
         
@@ -293,6 +295,9 @@ class DreamBoothDataset(Dataset):
         uc = self.sd_model.get_learned_conditioning([''])
         c =  self.sd_model.get_learned_conditioning([''])
 
+        #adm_cond.requires_grad = True
+        #adm_uc.requires_grad = True
+        
         c = {"c_crossattn": [c], "c_adm": adm_cond}
         uc = {"c_crossattn": [uc], "c_adm": adm_uc}
 
