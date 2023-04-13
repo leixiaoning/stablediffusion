@@ -12,6 +12,7 @@ import numpy as np
 import base64
 import urllib
 from einops import repeat
+import PIL
 
 mtface = None
 
@@ -32,7 +33,7 @@ class FTConfig(object):
         self.max_train_steps = 200
         self.num_train_epochs = 1
         self.face_detect = False
-        self.batchsize = 5
+        self.batchsize = 2 #5
         self.text_prior_timestep = 25
 
 def collate_fn(examples, tokenizer=None, with_prior_preservation=True): #dataset 后处理 函数
@@ -170,6 +171,17 @@ class DreamBoothDataset(Dataset):
             ]
         )
 
+    def load_img_local(self, path):
+        image = Image.open(path).convert("RGB")
+        w, h = image.size
+        #print(f"loaded input image of size ({w}, {h}) from {path}")
+        w, h = map(lambda x: x - x % 64, (w, h))  # resize to integer multiple of 64
+        image_resize = image.resize((w, h), resample=PIL.Image.LANCZOS)
+        image = np.array(image_resize).astype(np.float32) / 255.0
+        image = image[None].transpose(0, 3, 1, 2)
+        image = torch.from_numpy(image)
+        return image_resize, 2. * image - 1.
+
     def image_offset(self, Img, xoff, yoff):
         width, height = Img.size
         c = ImageChops.offset(Img, xoff, yoff)
@@ -219,6 +231,7 @@ class DreamBoothDataset(Dataset):
 
     def __getitem__(self, index):
         example = {}
+        
         instance_image = Image.open(self.instance_images_path[index % self.num_instance_images])
         with open(self.instance_jsons_path[index % self.num_instance_images], "r") as f:
             body = js.load(f)
@@ -226,10 +239,11 @@ class DreamBoothDataset(Dataset):
             instance_roll = math.degrees(body["roll"])
         if not instance_image.mode == "RGB":
             instance_image = instance_image.convert("RGB")
-
         instance_image = self.get_face_image(instance_image, instance_box, instance_roll, instance_image.width, instance_image.height)
         example["instance_images"] = self.image_transforms(instance_image)
         
+        #instance_image, norm_image = self.load_img_local(self.instance_images_path[index % self.num_instance_images])
+        #example["instance_images"] = norm_image[0]
         adm_cond = iter(self.karlo_prior_model(self.instance_prompt, 1, progressive_mode="final")).__next__()
         _, noise_level_emb = self.sd_model.noise_augmentor(adm_cond, noise_level=repeat(
                         torch.tensor([0]).to(self.sd_model.device), '1 -> b', b=1))
@@ -238,11 +252,14 @@ class DreamBoothDataset(Dataset):
         example['instance_text_emb'] = self.get_crossattn_adm(adm_cond, adm_uc)
         
         if self.class_data_root:
+            
             class_image = Image.open(self.class_images_path[index % self.num_class_images])
             if not class_image.mode == "RGB":
                 class_image = class_image.convert("RGB")
             example["class_images"] = self.image_transforms(class_image)
             
+            #class_image, norm_image = self.load_img_local(self.class_images_path[index % self.num_class_images])
+            #example["class_images"] = norm_image[0]
             adm_cond = iter(self.karlo_prior_model(self.class_prompt, 1, progressive_mode="final")).__next__()
             _, noise_level_emb = self.sd_model.noise_augmentor(adm_cond, noise_level=repeat(
                         torch.tensor([0]).to(self.sd_model.device), '1 -> b', b=1))

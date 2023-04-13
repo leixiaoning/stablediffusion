@@ -385,18 +385,58 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
     device = state['model'].betas.device
     seed_everything(2023)
+    sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)# 初始化一些参数
+    batchsize = 2*config.batchsize
     for epoch in range(config.num_train_epochs):
         state['model'].model.train()
         #state['karlo_prior']._prior.train()
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(state['model'].model):
-
                 text_emb = batch['text_emb']
                 img_emb = batch['img_emb']
-                pixels = batch['pixel_values']
-                emb = img_emb
+                pixels = batch['pixel_values'].to(device)
+                emb = text_emb
+                #latent
+                timesteps = torch.randint(0, sampler.ddpm_num_timesteps, (batchsize,), device=device)
+                init_latent = state['model'].get_first_stage_encoding(state['model'].encode_first_stage(pixels))
+                noise = torch.randn_like(init_latent)
+                latents = sampler.stochastic_encode(init_latent, timesteps, use_original_steps=True, noise=noise) #add noise
+                #引导条件
+                c_in = emb['c'] 
+                x_in = latents
+                t_in = timesteps
+                #unet
+                model_uncond, model_t = state['model'].model(x_in, t_in, **c_in).chunk(2) # DiffusionWrapper
+                noise, noise_prior = noise.chunk(2)
+                
 
-                batchsize = 2*config.batchsize
+                
+                model_output = model_uncond + 10.0 * (model_t - model_uncond)
+                #denoise
+                if state['model'].parameterization == "v":
+                    e_t = state['model'].predict_eps_from_z_and_v(latents, timesteps, model_output)
+                else:
+                    e_t = model_output
+
+                a_t = sampler.alphas_cumprod[timesteps][:,None,None,None]
+                a_prev = sampler.alphas_cumprod[timesteps-1][:,None,None,None] # -1 会是个例外
+                sigma_t =  0.0 * torch.sqrt((1 - a_prev) / (1 - a_t) * (1 - a_t / a_prev))
+                sqrt_one_minus_at = torch.sqrt(1. - a_t)
+
+                if state['model'].parameterization != "v":
+                    pred_x0 = (latents - sqrt_one_minus_at * e_t) / a_t.sqrt()
+                else:
+                    pred_x0 = state['model'].predict_start_from_z_and_v(latents, timesteps, model_output)
+
+                dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
+                noise = sigma_t * noise_like(latents.shape, device, False) * 1.0
+
+                x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
+                # x_prev 和 latents 做loss
+
+
+
+
                 sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)
                 img = torch.randn([batchsize]+shape, device=device)
                 timesteps = sampler.ddim_timesteps
@@ -450,6 +490,8 @@ if __name__ == "__main__":
                     x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
 
                     img = x_prev
+
+                    # x_prev 和 latents 做loss
                     
                 #torch.cuda.empty_cache()
                 samples_ddim = img
