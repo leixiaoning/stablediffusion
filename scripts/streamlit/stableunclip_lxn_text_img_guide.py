@@ -344,7 +344,7 @@ if __name__ == "__main__":
         instance_prompt=config.instance_prompt,
         class_data_root=config.class_data_dir if config.with_prior_preservation else None,
         class_prompt=config.class_prompt,
-        tokenizer=state["karlo_prior"]._tokenizer,
+        tokenizer=None,
         size=config.resolution,
         center_crop=config.center_crop,
         text_max_length=state['karlo_prior']._prior.model.text_ctx,
@@ -385,6 +385,8 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
     device = state['model'].betas.device
     seed_everything(2023)
+    batchsize = 2*config.batchsize
+    sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)
     for epoch in range(config.num_train_epochs):
         state['model'].model.train()
         #state['karlo_prior']._prior.train()
@@ -396,8 +398,7 @@ if __name__ == "__main__":
                 pixels = batch['pixel_values']
                 emb = img_emb
 
-                batchsize = 2*config.batchsize
-                sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)
+                
                 img = torch.randn([batchsize]+shape, device=device)
                 timesteps = sampler.ddim_timesteps
                 time_range = np.flip(timesteps)
