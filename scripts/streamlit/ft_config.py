@@ -33,7 +33,7 @@ class FTConfig(object):
         self.max_train_steps = 200
         self.num_train_epochs = 1
         self.face_detect = False
-        self.batchsize = 2 #5
+        self.batchsize = 3 #5
         self.text_prior_timestep = 25
         
         self.set_grads_to_none = False
@@ -232,7 +232,7 @@ class DreamBoothDataset(Dataset):
     def __len__(self):
         return self._length
 
-    @torch.no_grad()
+    #@torch.no_grad()
     def __getitem__(self, index):
         example = {}
         

@@ -26,9 +26,9 @@ from diffusers.optimization import get_scheduler
 import json as js
 from tqdm import tqdm
 from ldm.modules.diffusionmodules.util import noise_like
-import torch.nn.functional as F
 
-#torch.set_grad_enabled(False)
+
+torch.set_grad_enabled(False)
 
 PROMPTS_ROOT = "scripts/prompts/"
 SAVE_PATH = "outputs/demo/stable-unclip/"
@@ -295,9 +295,9 @@ def load_model_from_config(config, ckpt, verbose=False, vae_sd=None):
     print(f"Loaded global step {global_step}")
     return model, msg
 
-
 def process_data(config, request_dir = 'cache/tmp_data/'):
     instance_dir = os.path.join(request_dir, 'instance_data')
+    
     n_valid_image = 0
     if os.path.exists(config.instance_dir):
         imgs = os.listdir(config.instance_dir)
@@ -305,6 +305,7 @@ def process_data(config, request_dir = 'cache/tmp_data/'):
             imgi = imgs[i]
             d = os.path.join(config.instance_dir, imgi)
             user_image, image_error_flag = load_image(d, 'jpg')
+
             if not image_error_flag:
                 if config.face_detect:
                     face_image, box, roll = resize_image(user_image)
@@ -318,15 +319,13 @@ def process_data(config, request_dir = 'cache/tmp_data/'):
                                       encoding='utf-8') as f:
                         js.dump({"image": str(i) + ".jpg", "box": box, "roll": float(roll)}, f)
                     n_valid_image += 1
-
     if n_valid_image <= 0:
         if os.path.exists(request_dir):
             import shutil
             shutil.rmtree(request_dir)
         print("valid image num is not enough")
         exit()
-
-    return instance_dir        
+    return instance_dir
 
 if __name__ == "__main__":
     version = 'Stable unCLIP-L'
@@ -345,7 +344,7 @@ if __name__ == "__main__":
         instance_prompt=config.instance_prompt,
         class_data_root=config.class_data_dir if config.with_prior_preservation else None,
         class_prompt=config.class_prompt,
-        tokenizer=None,#state["karlo_prior"]._tokenizer,
+        tokenizer=state["karlo_prior"]._tokenizer,
         size=config.resolution,
         center_crop=config.center_crop,
         text_max_length=state['karlo_prior']._prior.model.text_ctx,
@@ -353,11 +352,10 @@ if __name__ == "__main__":
         pipe_img_karlo=pipe_img_karlo,
         sd_model=state["model"],
         karlo_prior_model=state["karlo_prior"],
-    )  
+    )
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=config.batchsize, shuffle=True, collate_fn=collate_fn, num_workers=0)
     ######
-    accelerator = Accelerator(gradient_accumulation_steps=config.gradient_accumulation_steps, 
-            mixed_precision='fp16', log_with="tensorboard", logging_dir='cache/log')
+    accelerator = Accelerator(mixed_precision='fp16', log_with="tensorboard", logging_dir='cache/log')
     if accelerator.is_main_process:
         print("accelerator main process !!")
     #优化器
@@ -371,7 +369,8 @@ if __name__ == "__main__":
         weight_decay=0.01,
         eps=1e-8,
     )
-
+    
+    
     lr_scheduler = get_scheduler(
         config.lr_scheduler,
         optimizer=optimizer,
@@ -382,59 +381,94 @@ if __name__ == "__main__":
     accelerator.prepare(state['model'].model, optimizer, train_dataloader, lr_scheduler)#state['karlo_prior']._prior
 
     shape=[4, 768 // 8, 768 // 8]
+    SAVE_PATH = os.path.join(SAVE_PATH, version)
+    os.makedirs(os.path.join(SAVE_PATH, "samples"), exist_ok=True)
     device = state['model'].betas.device
-    batchsize = 2*config.batchsize
-    global_step = 0
-    sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)# 初始化一些参数
     seed_everything(2023)
     for epoch in range(config.num_train_epochs):
         state['model'].model.train()
         #state['karlo_prior']._prior.train()
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(state['model'].model):
+
                 text_emb = batch['text_emb']
                 img_emb = batch['img_emb']
-                pixels = batch['pixel_values'].to(device)
-                emb = text_emb
-                #latent
-                timesteps = torch.randint(0, sampler.ddpm_num_timesteps, (batchsize,), device=device)
-                init_latent = state['model'].get_first_stage_encoding(state['model'].encode_first_stage(pixels))
-                noise = torch.randn_like(init_latent)
-                latents = sampler.stochastic_encode(init_latent, timesteps, use_original_steps=True, noise=noise) #add noise
-                #引导条件
-                c_in = emb['c'] 
-                x_in = latents
-                t_in = timesteps
-                #unet with torch.set_grad_enabled(True):
-                model_uncond, model_t = state['model'].model(x_in, t_in, **c_in).chunk(2) # DiffusionWrapper
-                noise, noise_prior = noise.chunk(2)
+                pixels = batch['pixel_values']
+                emb = img_emb
+
+                batchsize = 2*config.batchsize
+                sampler.make_schedule(ddim_num_steps=steps, ddim_eta=0.0, verbose=False)
+                img = torch.randn([batchsize]+shape, device=device)
+                timesteps = sampler.ddim_timesteps
+                time_range = np.flip(timesteps)
+                total_steps = timesteps.shape[0]
+                iterator = tqdm(time_range, desc='DDIM Sampler', total=total_steps)
+                for i, step in enumerate(iterator):
+                    index = total_steps - i - 1
+                    ts = torch.full((batchsize,), step, device=device, dtype=torch.long)
+                    
+                    c = emb['c']
+                    unconditional_conditioning = emb['uc']
+                    x_in = torch.cat([img] * 2)
+                    t_in = torch.cat([ts] * 2)
+                    c_in = dict()
+                    for k in c:
+                        if isinstance(c[k], list):
+                            c_in[k] = [torch.cat([
+                                unconditional_conditioning[k][i],
+                                c[k][i]]) for i in range(len(c[k]))]
+                        else:
+                            c_in[k] = torch.cat([
+                                    unconditional_conditioning[k],
+                                    c[k]])
+                    model_uncond, model_t = state['model'].model(x_in, t_in, **c_in).chunk(2) # DiffusionWrapper
+                    model_output = model_uncond + 10.0 * (model_t - model_uncond)
+
+                    if state['model'].parameterization == "v":
+                        e_t = state['model'].predict_eps_from_z_and_v(img, ts, model_output)
+                    else:
+                        e_t = model_output
+
+                    alphas = sampler.ddim_alphas
+                    alphas_prev = sampler.ddim_alphas_prev
+                    sqrt_one_minus_alphas = sampler.ddim_sqrt_one_minus_alphas
+                    sigmas = sampler.ddim_sigmas
+
+                    a_t = torch.full((batchsize, 1, 1, 1), alphas[index], device=device)
+                    a_prev = torch.full((batchsize, 1, 1, 1), alphas_prev[index], device=device)
+                    sigma_t = torch.full((batchsize, 1, 1, 1), sigmas[index], device=device)
+                    sqrt_one_minus_at = torch.full((batchsize, 1, 1, 1), sqrt_one_minus_alphas[index],device=device)
+
+                    if state['model'].parameterization != "v":
+                        pred_x0 = (img - sqrt_one_minus_at * e_t) / a_t.sqrt()
+                    else:
+                        pred_x0 = state['model'].predict_start_from_z_and_v(img, ts, model_output)
+
+                    dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
+                    noise = sigma_t * noise_like(img.shape, device, False) * 1.0
+
+                    x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
+
+                    img = x_prev
+                    
+                #torch.cuda.empty_cache()
+                samples_ddim = img
+                x_samples = state["model"].decode_first_stage(samples_ddim) # decode (1, 4, 96, 96) -> (1, 3, 768, 768)
+                x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
                 
-                loss1 = F.mse_loss(model_uncond.float(), noise.float(), reduction="none").mean(
-                        [1, 2, 3]).mean()
-                loss2 = F.mse_loss(model_t.float(), noise_prior.float(), reduction="mean")
-                loss = loss1 + 1.0 * loss2
-                optimizer.zero_grad(set_to_none=config.set_grads_to_none)#梯度清零或者清为None，后者可以节省显存
-                accelerator.backward(loss.contiguous())
-                if accelerator.sync_gradients:
-                    params_to_clip = (state['model'].model.parameters())
-                    accelerator.clip_grad_norm_(params_to_clip, 1.0)
-                    global_step += 1
-                optimizer.step()
-                lr_scheduler.step()
+                #image = load_img_local('/www/simple_ssd/lxn3/karlo/datatest/317_2/style/starry_night.jpeg')
+                #image = image.type(x_samples.dtype).to(x_samples.device)
+                #samples_ddim2 = model.get_first_stage_encoding(model.encode_first_stage(image))
+                #x_samples2 = model.decode_first_stage(samples_ddim2)
                 
 
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-            #accelerator.log(logs, step=global_step)
-            print(logs)
-            
-            if global_step >= config.max_train_steps:
-                break
-
-        accelerator.wait_for_everyone()
-
-    if accelerator.is_main_process:
-        pass # 保存模型
-    accelerator.end_training()
+                if True: #保存图片
+                    base_count = len(os.listdir(os.path.join(SAVE_PATH, "samples")))
+                    for x_sample in x_samples:
+                        x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                        Image.fromarray(x_sample.astype(np.uint8)).save(
+                            os.path.join(SAVE_PATH, "samples", f"{base_count:09}.png"))
+                        base_count += 1
 
     
 
